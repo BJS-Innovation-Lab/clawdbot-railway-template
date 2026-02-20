@@ -294,6 +294,48 @@ function requireSetupAuth(req, res, next) {
 
 const app = express();
 app.disable("x-powered-by");
+
+// ── API proxy bypass ──────────────────────────────────────────────────
+// Routes that must be forwarded to the gateway with their raw body intact.
+// express.json() consumes the request body, leaving nothing for http-proxy
+// to forward. These routes bypass all Express middleware and go straight
+// to the gateway via http-proxy.
+const earlyProxy = httpProxy.createProxyServer({
+  target: `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`,
+  ws: false,
+  xfwd: true,
+});
+earlyProxy.on("error", (err, _req, res) => {
+  console.error("[earlyProxy]", err);
+  try {
+    if (res && typeof res.writeHead === "function" && !res.headersSent) {
+      res.writeHead(502, { "Content-Type": "text/plain" });
+      res.end("Gateway unavailable\n");
+    }
+  } catch {}
+});
+
+app.use("/v1", async (req, res) => {
+  if (isConfigured()) {
+    try { await ensureGatewayRunning(); } catch {}
+  }
+  earlyProxy.web(req, res);
+});
+
+app.use("/hooks", async (req, res) => {
+  if (isConfigured()) {
+    try { await ensureGatewayRunning(); } catch {}
+  }
+  earlyProxy.web(req, res);
+});
+
+app.use("/tools", async (req, res) => {
+  if (isConfigured()) {
+    try { await ensureGatewayRunning(); } catch {}
+  }
+  earlyProxy.web(req, res);
+});
+
 app.use(express.json({ limit: "1mb" }));
 
 // Minimal health endpoint for Railway.

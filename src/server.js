@@ -18,6 +18,9 @@ for (const suffix of ["PUBLIC_PORT", "STATE_DIR", "WORKSPACE_DIR", "GATEWAY_TOKE
     // Best-effort compatibility shim for old Railway templates.
     // Intentionally no warning: Railway templates can still set legacy keys and warnings are noisy.
   }
+  // Avoid forwarding legacy variables into OpenClaw subprocesses.
+  // OpenClaw logs a warning when deprecated CLAWDBOT_* variables are present.
+  delete process.env[oldKey];
 }
 
 // Railway injects PORT at runtime and routes traffic to that port.
@@ -294,48 +297,6 @@ function requireSetupAuth(req, res, next) {
 
 const app = express();
 app.disable("x-powered-by");
-
-// ── API proxy bypass ──────────────────────────────────────────────────
-// Routes that must be forwarded to the gateway with their raw body intact.
-// express.json() consumes the request body, leaving nothing for http-proxy
-// to forward. These routes bypass all Express middleware and go straight
-// to the gateway via http-proxy.
-const earlyProxy = httpProxy.createProxyServer({
-  target: `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`,
-  ws: false,
-  xfwd: true,
-});
-earlyProxy.on("error", (err, _req, res) => {
-  console.error("[earlyProxy]", err);
-  try {
-    if (res && typeof res.writeHead === "function" && !res.headersSent) {
-      res.writeHead(502, { "Content-Type": "text/plain" });
-      res.end("Gateway unavailable\n");
-    }
-  } catch {}
-});
-
-app.use("/v1", async (req, res) => {
-  if (isConfigured()) {
-    try { await ensureGatewayRunning(); } catch {}
-  }
-  earlyProxy.web(req, res);
-});
-
-app.use("/hooks", async (req, res) => {
-  if (isConfigured()) {
-    try { await ensureGatewayRunning(); } catch {}
-  }
-  earlyProxy.web(req, res);
-});
-
-app.use("/tools", async (req, res) => {
-  if (isConfigured()) {
-    try { await ensureGatewayRunning(); } catch {}
-  }
-  earlyProxy.web(req, res);
-});
-
 app.use(express.json({ limit: "1mb" }));
 
 // Minimal health endpoint for Railway.
@@ -1367,7 +1328,45 @@ proxy.on("error", (err, _req, res) => {
   }
 });
 
-app.use(async (req, res) => {
+// --- Dashboard password protection ---
+// Require the same SETUP_PASSWORD for the entire Control UI dashboard,
+// not just the /setup routes.  Healthcheck is excluded so Railway probes work.
+function requireDashboardAuth(req, res, next) {
+  if (req.path === "/healthz" || req.path === "/setup/healthz") return next();
+  if (req.path.startsWith("/hooks")) return next(); // allow OpenClaw webhook endpoints to bypass dashboard auth
+  if (req.path.startsWith("/v1/")) return next(); // allow API endpoints to bypass dashboard auth
+  if (!SETUP_PASSWORD) return next(); // no password configured → open
+  const header = req.headers.authorization || "";
+  const [scheme, encoded] = header.split(" ");
+  if (scheme !== "Basic" || !encoded) {
+    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
+    return res.status(401).send("Auth required");
+  }
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  const idx = decoded.indexOf(":");
+  const password = idx >= 0 ? decoded.slice(idx + 1) : "";
+  if (password !== SETUP_PASSWORD) {
+    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
+    return res.status(401).send("Invalid password");
+  }
+  return next();
+}
+
+// --- Gateway token injection ---
+// The gateway is only reachable from this container. The Control UI in the browser
+// cannot set custom Authorization headers for WebSocket connections, so we inject
+// the token into proxied requests at the wrapper level.
+function attachGatewayAuthHeader(req) {
+  if (!req?.headers?.authorization && OPENCLAW_GATEWAY_TOKEN) {
+    req.headers.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
+  }
+}
+
+proxy.on("proxyReqWs", (_proxyReq, req) => {
+  attachGatewayAuthHeader(req);
+});
+
+app.use(requireDashboardAuth, async (req, res) => {
   // If not configured, force users to /setup for any non-setup routes.
   if (!isConfigured() && !req.path.startsWith("/setup")) {
     return res.redirect("/setup");
@@ -1389,6 +1388,7 @@ app.use(async (req, res) => {
     }
   }
 
+  attachGatewayAuthHeader(req);
   return proxy.web(req, res, { target: GATEWAY_TARGET });
 });
 
@@ -1432,6 +1432,21 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     }
   }
 
+  // Sync gateway tokens in config with the current env var on every startup.
+  // This prevents "gateway token mismatch" when OPENCLAW_GATEWAY_TOKEN changes
+  // (e.g. Railway variable update) but the config file still has the old value.
+  if (isConfigured() && OPENCLAW_GATEWAY_TOKEN) {
+    console.log("[wrapper] syncing gateway tokens in config...");
+    try {
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.mode", "token"]));
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]));
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.remote.token", OPENCLAW_GATEWAY_TOKEN]));
+      console.log("[wrapper] gateway tokens synced");
+    } catch (err) {
+      console.warn(`[wrapper] failed to sync gateway tokens: ${String(err)}`);
+    }
+  }
+
   // Auto-start the gateway if already configured so polling channels (Telegram/Discord/etc.)
   // work even if nobody visits the web UI.
   if (isConfigured()) {
@@ -1446,6 +1461,10 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 });
 
 server.on("upgrade", async (req, socket, head) => {
+  // Note: browsers cannot attach arbitrary HTTP headers (including Authorization: Basic)
+  // in WebSocket handshakes. Do not enforce dashboard Basic auth at the upgrade layer.
+  // The gateway authenticates at the protocol layer and we inject the gateway token below.
+
   if (!isConfigured()) {
     socket.destroy();
     return;
@@ -1456,6 +1475,7 @@ server.on("upgrade", async (req, socket, head) => {
     socket.destroy();
     return;
   }
+  attachGatewayAuthHeader(req);
   proxy.ws(req, socket, head, { target: GATEWAY_TARGET });
 });
 

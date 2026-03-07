@@ -297,7 +297,7 @@ function requireSetupAuth(req, res, next) {
 
 const app = express();
 app.disable("x-powered-by");
-app.use((req, res, next) => { if (req.path.startsWith("/v1")) return next(); express.json({ limit: "1mb" })(req, res, next); });
+app.use((req, res, next) => { if (req.path.startsWith("/v1") || req.path.startsWith("/hooks")) return next(); express.json({ limit: "1mb" })(req, res, next); });
 
 // Minimal health endpoint for Railway.
 app.get("/setup/healthz", (_req, res) => res.json({ ok: true }));

@@ -77,6 +77,8 @@ RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"'
   && chmod +x /usr/local/bin/openclaw
 
 COPY src ./src
+COPY scripts/vulkn-auto-boot.sh ./scripts/vulkn-auto-boot.sh
+COPY assets/bootstrap.sh ./assets/bootstrap.sh
 
 # The wrapper listens on $PORT.
 # IMPORTANT: Do not set a default PORT here.

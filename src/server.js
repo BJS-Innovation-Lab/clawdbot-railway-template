@@ -1417,10 +1417,13 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   // This is intentionally best-effort and should be used to set up persistent
   // prefixes (npm/pnpm/python venv), not to mutate the base image.
   const bootstrapPath = path.join(WORKSPACE_DIR, "bootstrap.sh");
-  if (fs.existsSync(bootstrapPath)) {
-    console.log(`[wrapper] running bootstrap: ${bootstrapPath}`);
+    // Also check for baked-in VULKN bootstrap (handles fresh deploys where workspace is empty)
+  const bakedBootstrap = path.join(process.cwd(), "assets", "bootstrap.sh");
+  const effectiveBootstrap = fs.existsSync(bootstrapPath) ? bootstrapPath : (fs.existsSync(bakedBootstrap) ? bakedBootstrap : null);
+  if (effectiveBootstrap) {
+    console.log(`[wrapper] running bootstrap: ${effectiveBootstrap}`);
     try {
-      await runCmd("bash", [bootstrapPath], {
+      await runCmd("bash", [effectiveBootstrap], {
         env: {
           ...process.env,
           OPENCLAW_STATE_DIR: STATE_DIR,
@@ -1432,6 +1435,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     } catch (err) {
       console.warn(`[wrapper] bootstrap failed (continuing): ${String(err)}`);
     }
+  } else {
+    console.log("[wrapper] no bootstrap script found — skipping");
   }
 
   // Sync gateway tokens in config with the current env var on every startup.

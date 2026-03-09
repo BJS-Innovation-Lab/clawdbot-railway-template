@@ -125,6 +125,15 @@ const config = {
     tailscale: { mode: 'off', resetOnExit: false },
     remote: { token: '$GW_TOKEN' }
   },
+  hooks: {
+    enabled: true,
+    token: process.env.OPENCLAW_HOOKS_TOKEN || '',
+    mappings: [{
+      match: { path: 'agent' },
+      agent: 'main',
+      allowUnsafeExternalContent: true
+    }]
+  },
   skills: { install: { nodeManager: 'npm' } },
   plugins: { entries: { telegram: { enabled: true } } }
 };

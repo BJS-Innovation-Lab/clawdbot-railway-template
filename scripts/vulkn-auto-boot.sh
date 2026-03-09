@@ -205,17 +205,82 @@ if [ -n "${BRAIN_REPO:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
         fi
     fi
 
-    # Create symlinks from workspace root to brain files
-    for f in SOUL.md IDENTITY.md USER.md MEMORY.md TOOLS.md HEARTBEAT.md AGENTS.md; do
-        if [ -f "$BRAIN_DIR/$f" ] && [ ! -L "$WORKSPACE_DIR/$f" ]; then
-            ln -sf "$BRAIN_DIR/$f" "$WORKSPACE_DIR/$f"
+    # Copy brain files to workspace (agent owns local copies, no symlinks)
+    BRAIN_SRC="$BRAIN_CLONE_DIR/$AGENT_NAME"
+    if echo "$REPO_NAME" | grep -qi "cloud-brains\|brains"; then
+        BRAIN_SRC="$BRAIN_CLONE_DIR/$AGENT_NAME"
+    else
+        BRAIN_SRC="$BRAIN_DIR"
+    fi
+
+    for f in SOUL.md IDENTITY.md USER.md MEMORY.md TOOLS.md HEARTBEAT.md AGENTS.md BOOTSTRAP.md; do
+        if [ -f "$BRAIN_SRC/$f" ] && [ ! -f "$WORKSPACE_DIR/$f" ]; then
+            cp "$BRAIN_SRC/$f" "$WORKSPACE_DIR/$f"
+            log "  Copied $f"
         fi
     done
-    if [ -d "$BRAIN_DIR/memory" ] && [ ! -L "$WORKSPACE_DIR/memory" ]; then
-        rm -rf "$WORKSPACE_DIR/memory" 2>/dev/null || true
-        ln -sf "$BRAIN_DIR/memory" "$WORKSPACE_DIR/memory"
+    # Copy memory directory if it exists and workspace doesn't have one yet
+    if [ -d "$BRAIN_SRC/memory" ] && [ ! -d "$WORKSPACE_DIR/memory" ]; then
+        cp -r "$BRAIN_SRC/memory" "$WORKSPACE_DIR/memory"
+        log "  Copied memory/"
     fi
-    log "  ✅ Symlinks configured"
+    # Remove any old symlinks (migration from symlink pattern)
+    for f in SOUL.md IDENTITY.md USER.md MEMORY.md TOOLS.md HEARTBEAT.md AGENTS.md BOOTSTRAP.md memory; do
+        if [ -L "$WORKSPACE_DIR/$f" ]; then
+            rm "$WORKSPACE_DIR/$f"
+            cp -r "$BRAIN_SRC/$f" "$WORKSPACE_DIR/$f" 2>/dev/null || true
+            log "  Migrated symlink → local: $f"
+        fi
+    done
+    log "  ✅ Brain files copied (agent owns local copies)"
+
+    # Set up pre-commit hook for agent folder isolation
+    if [ -f "$BRAIN_CLONE_DIR/hooks/pre-commit" ]; then
+        git -C "$BRAIN_CLONE_DIR" config core.hooksPath hooks/
+        log "  ✅ Agent isolation hook enabled"
+    fi
+
+    # Create nightly brain backup cron script
+    BACKUP_SCRIPT="$WORKSPACE_DIR/scripts/brain-backup.sh"
+    mkdir -p "$WORKSPACE_DIR/scripts"
+    cat > "$BACKUP_SCRIPT" << 'BACKUP_EOF'
+#!/bin/bash
+# Nightly brain backup — copies local files to brain repo and pushes
+set -euo pipefail
+WORKSPACE="${OPENCLAW_WORKSPACE_DIR:-/data/workspace}"
+AGENT="${AGENT_NAME:-agent}"
+BRAIN_CLONE="$WORKSPACE/.brain-repo"
+
+if [ ! -d "$BRAIN_CLONE/.git" ]; then
+    echo "No brain repo clone found. Skipping backup."
+    exit 0
+fi
+
+cd "$BRAIN_CLONE"
+git pull --rebase 2>/dev/null || true
+
+# Copy local files back to repo
+for f in SOUL.md IDENTITY.md USER.md MEMORY.md TOOLS.md HEARTBEAT.md AGENTS.md; do
+    if [ -f "$WORKSPACE/$f" ]; then
+        cp "$WORKSPACE/$f" "$BRAIN_CLONE/$AGENT/$f"
+    fi
+done
+# Copy memory directory
+if [ -d "$WORKSPACE/memory" ]; then
+    cp -r "$WORKSPACE/memory/"* "$BRAIN_CLONE/$AGENT/memory/" 2>/dev/null || true
+fi
+
+# Commit and push if there are changes
+git add "$AGENT/"
+if ! git diff --cached --quiet; then
+    git commit -m "$AGENT: nightly brain backup $(date +%Y-%m-%d)"
+    git push 2>/dev/null || echo "Push failed — will retry next backup"
+else
+    echo "No changes to back up."
+fi
+BACKUP_EOF
+    chmod +x "$BACKUP_SCRIPT"
+    log "  ✅ Brain backup script created"
 else
     log "Step 4/5: No BRAIN_REPO set. Skipping."
 fi

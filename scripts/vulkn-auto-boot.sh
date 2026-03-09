@@ -130,7 +130,6 @@ const config = {
     token: process.env.OPENCLAW_HOOKS_TOKEN || '',
     mappings: [{
       match: { path: 'agent' },
-      agent: 'main',
       allowUnsafeExternalContent: true
     }]
   },
